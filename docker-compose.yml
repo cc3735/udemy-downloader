@@ -29,8 +29,10 @@ services:
       - ./config:/app/config:rw
       # Key cache must be writable so the sidecar can append new KID:KEY pairs.
       - ./keyfile.json:/app/keyfile.json:rw
-      # Output: courses land under J:\V\2026\udemy\<course>\... by default.
-      - ${UDL_OUT_HOST:-J:/V/2026/udemy}:/app/out_dir:rw
+      # Hot-reload sidecar + utility scripts without rebuilding the image.
+      - ./scripts:/app/scripts:ro
+      # Output: courses land under J:\Knowledge\udemy\<course>\... by default.
+      - ${UDL_OUT_HOST:-J:/Knowledge/udemy}:/app/out_dir:rw
     environment:
       - UDL_WVD_PATH=/cdm/widevine.wvd
       - UDL_KEYS_FILE=/app/keyfile.json

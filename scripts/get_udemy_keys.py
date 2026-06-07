@@ -72,17 +72,22 @@ from pywidevine.pssh import PSSH
 
 
 # ---------------------------------------------------------------------
-# Stage F constants -- fill these in via DevTools recon (see module
-# docstring above).
+# Stage F constants -- pinned 2026-06-07 from
+# config/udemy-recon3.har (beginners-guide-to-technical-analysis DRM
+# lecture).  See parse_recon_har.py for the discovery script.
 # ---------------------------------------------------------------------
 
-# Per-asset Widevine license POST endpoint.  The actual value depends on
-# Udemy's player; capture via F12 Network while a DRM lecture plays.
-LICENSE_URL_TPL: Optional[str] = None  # e.g. "https://www.udemy.com/api-2.0/.../widevine-license/{asset_id}/"
+# Udemy's Widevine license endpoint takes a per-asset auth_token JWT
+# in the query string.  Each lecture's asset has its own JWT in
+# `asset.media_license_token`, so the sidecar fetches that first and
+# substitutes it here.
+LICENSE_URL_TPL: str = (
+    "https://www.udemy.com/media-license-server/validate-auth-token"
+    "?drm_type=widevine&auth_token={auth_token}"
+)
 
-# Optional service certificate URL (some providers require setting a
-# cert on the CDM before generating a challenge; many do not).  Leave
-# None until you confirm Udemy needs one.
+# No service certificate is required for Udemy's flow (verified in
+# the HAR -- no cert.do request precedes the license POST).
 SERVICE_CERT_URL: Optional[str] = None
 
 # Default polite delay between license requests (seconds).
@@ -166,9 +171,12 @@ def load_keyfile(path: Path) -> dict:
 
 
 def save_keyfile(path: Path, keys: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(keys, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    # keyfile.json is bind-mounted from the host -- can't use the
+    # tmp-write + atomic-rename trick (Linux: EBUSY when the target is
+    # a bind-mounted file).  Do a direct in-place write; brief race
+    # window if another process reads at the same time is acceptable
+    # given the sidecar is the only writer.
+    path.write_text(json.dumps(keys, indent=2, sort_keys=True), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------
@@ -187,19 +195,33 @@ def load_cdm(wvd_path: Path) -> Cdm:
 
 
 # ---------------------------------------------------------------------
-# Udemy API enumeration -- reuses upstream's URLs + HEADERS
+# Udemy API enumeration -- uses upstream's Session (curl_cffi +
+# chrome120 impersonation + visit() preflight to clear Cloudflare).
 # ---------------------------------------------------------------------
 
-def _udemy_session(bearer: str) -> requests.Session:
-    sess = requests.Session()
-    headers = dict(HEADERS)  # upstream Android-app headers
+# Stub the module-level `logger` upstream's main.py expects.  It's only
+# initialized when main.py is run directly; importing Session bypasses
+# that path.
+import main as _udl_main  # type: ignore
+if getattr(_udl_main, "logger", None) is None:
+    _udl_main.logger = logging.getLogger("get_udemy_keys.upstream")
+
+from main import Session as _UpstreamSession  # noqa: E402  type: ignore
+
+
+def _udemy_session(bearer: str) -> "_UpstreamSession":
+    """Build a Cloudflare-clearing Udemy session reusing upstream's
+    SSL/UA/header stack.  Returns the Session wrapper -- use ._get and
+    ._post for HTTP, .visit('www') has already been called."""
+    sess = _UpstreamSession()
     if bearer:
-        # Bearer auth slots into a separate header alongside upstream's
-        # basic-auth "authorization" (Udemy accepts both; the bearer is
-        # what proves user identity for license access).
-        headers["x-udemy-bearer"] = bearer
-        headers["authorization-bearer"] = f"Bearer {bearer}"
-    sess.headers.update(headers)
+        sess._set_auth_headers(bearer)
+    if not sess.visit("www"):
+        raise RuntimeError(
+            "Cloudflare preflight failed -- bearer may be expired or the "
+            "curl_cffi fingerprint is no longer accepted.  Refresh "
+            "config/bearer.txt and re-run."
+        )
     return sess
 
 
@@ -215,35 +237,63 @@ def extract_portal_and_slug(course_url: str) -> tuple[str, str]:
     return m.group("portal"), m.group("slug")
 
 
-def resolve_course_id(sess: requests.Session, portal: str, slug_or_id: str) -> str:
-    """If `slug_or_id` is already numeric, return it. Otherwise look up
-    the published_title -> id mapping via the user's subscribed-courses
-    list."""
+def resolve_course_id(sess: "_UpstreamSession", portal: str, slug_or_id: str) -> str:
+    """If `slug_or_id` is already numeric, return it. Otherwise hit the
+    course-by-slug detail endpoint."""
     if slug_or_id.isdigit():
         return slug_or_id
-    url = URLS.COURSE_SEARCH.format(portal_name=portal, course_name=slug_or_id)
-    r = sess.get(url, timeout=30)
-    r.raise_for_status()
-    for entry in r.json().get("results", []):
-        if entry.get("published_title") == slug_or_id:
-            return str(entry["id"])
-    raise ValueError(f"Course '{slug_or_id}' not found in user's subscribed courses")
+    url = f"https://www.udemy.com/api-2.0/courses/{slug_or_id}/?fields[course]=id"
+    r = sess._get(url)
+    if r.status_code != 200:
+        raise ValueError(
+            f"Could not resolve course '{slug_or_id}' (HTTP {r.status_code}): "
+            f"{r.text[:200]!r}"
+        )
+    cid = r.json().get("id")
+    if not cid:
+        raise ValueError(f"Course detail returned no id for '{slug_or_id}'")
+    return str(cid)
 
 
-def iter_curriculum(sess: requests.Session, portal: str, course_id: str) -> Iterable[dict]:
+def iter_curriculum(sess: "_UpstreamSession", portal: str, course_id: str) -> Iterable[dict]:
     """Walks the paginated /subscriber-curriculum-items/ endpoint and
     yields each `{_class: "lecture", asset: {...}}` entry."""
     next_url = URLS.CURRICULUM_ITEMS.format(portal_name=portal, course_id=course_id)
-    params = dict(CURRICULUM_ITEMS_PARAMS)
+    params: Optional[dict] = dict(CURRICULUM_ITEMS_PARAMS)
     while next_url:
-        r = sess.get(next_url, params=params if "?" not in next_url else None, timeout=30)
-        r.raise_for_status()
+        r = sess._get(next_url, data=params if "?" not in next_url else None)
+        if r.status_code != 200:
+            raise RuntimeError(
+                f"curriculum-items HTTP {r.status_code}: {r.text[:200]!r}"
+            )
         data = r.json()
         for item in data.get("results", []):
             if item.get("_class") == "lecture":
                 yield item
         next_url = data.get("next")
-        params = None  # only first request takes the params
+        params = None  # only the first request takes the params
+
+
+def fetch_fresh_lecture_asset(
+    sess: "_UpstreamSession", course_id: str, lecture_id: str
+) -> Optional[dict]:
+    """Re-fetch a lecture's asset via the per-lecture endpoint that
+    mints a fresh media_license_token JWT per call (the curriculum
+    endpoint serves cached tokens that expire within minutes).  Returns
+    the asset dict or None on failure."""
+    url = (
+        f"https://www.udemy.com/api-2.0/users/me/subscribed-courses/"
+        f"{course_id}/lectures/{lecture_id}/?fields[lecture]=asset"
+        "&fields[asset]=asset_type,course_is_drmed,media_license_token,"
+        "media_sources,stream_urls"
+    )
+    r = sess._get(url)
+    if r.status_code != 200:
+        logger.warning(
+            f"lecture-detail HTTP {r.status_code} for lecture {lecture_id}"
+        )
+        return None
+    return (r.json() or {}).get("asset") or None
 
 
 # ---------------------------------------------------------------------
@@ -257,12 +307,14 @@ _MPD_NS = {
 }
 
 
-def fetch_mpd_pssh(sess: requests.Session, mpd_url: str) -> Optional[bytes]:
+def fetch_mpd_pssh(sess: "_UpstreamSession", mpd_url: str) -> Optional[bytes]:
     """GET the MPD, return the base64-decoded Widevine PSSH box bytes
     from the first <cenc:pssh> element under a Widevine-scheme
     ContentProtection.  None if not found."""
-    r = sess.get(mpd_url, timeout=30)
-    r.raise_for_status()
+    r = sess._get(mpd_url)
+    if r.status_code != 200:
+        logger.warning(f"MPD fetch HTTP {r.status_code}: {r.text[:200]!r}")
+        return None
     try:
         root = ET.fromstring(r.text)
     except ET.ParseError as e:
@@ -292,56 +344,65 @@ def extract_dash_mpd_url(asset: dict) -> Optional[str]:
 # License exchange -- the Stage 3 of the playbook
 # ---------------------------------------------------------------------
 
-def fetch_service_cert(sess: requests.Session, url: str) -> Optional[bytes]:
+def fetch_service_cert(sess: "_UpstreamSession", url: str) -> Optional[bytes]:
     try:
-        r = sess.get(url, timeout=30)
-        r.raise_for_status()
+        r = sess._get(url)
+        if r.status_code != 200:
+            logger.warning(f"service cert HTTP {r.status_code}")
+            return None
         return r.content
-    except requests.RequestException as e:
+    except Exception as e:
         logger.warning(f"service cert fetch failed: {e}")
         return None
 
 
 def request_license(
-    sess: requests.Session,
+    sess: "_UpstreamSession",
     cfg: Config,
-    asset_id: str,
+    *,
+    auth_token: str,
     challenge: bytes,
+    referer: str,
 ) -> bytes:
+    """POST a Widevine challenge to Udemy's license server.
+
+    Udemy's endpoint (verified 2026-06-07):
+        POST https://www.udemy.com/media-license-server/validate-auth-token
+            ?drm_type=widevine&auth_token=<JWT>
+        Content-Type: application/octet-stream
+        Origin: https://www.udemy.com
+        Referer: <lecture URL the player is on>
+        body: raw Widevine challenge protobuf bytes
+        -> 200, application/octet-stream, raw Widevine license bytes
+    """
     if not cfg.license_url_tpl:
-        raise RuntimeError(
-            "LICENSE_URL_TPL is not configured.  Run the Stage F "
-            "reconnaissance (see scripts/get_udemy_keys.py docstring) "
-            "and set the constant at the top of this file, OR pass "
-            "--license-url '<URL>' explicitly."
-        )
-    url = cfg.license_url_tpl.format(asset_id=asset_id, course_id="")
-    r = sess.post(
+        raise RuntimeError("LICENSE_URL_TPL is empty -- pin it via Stage F.")
+    url = cfg.license_url_tpl.format(auth_token=auth_token)
+    r = sess._post(
         url,
         data=challenge,
         headers={
             "Content-Type": "application/octet-stream",
-            "Accept": "application/octet-stream, application/json",
+            "Accept": "*/*",
+            "Origin": "https://www.udemy.com",
+            "Referer": referer,
         },
-        timeout=30,
     )
     if r.status_code != 200:
         snippet = r.text[:200] if r.text else "<empty>"
         raise RuntimeError(f"license POST -> HTTP {r.status_code}: {snippet}")
-    # Some providers wrap the raw Widevine license bytes in JSON
-    # (`{"license": "<b64>"}`).  Detect + unwrap.
-    if r.headers.get("Content-Type", "").startswith("application/json"):
-        try:
-            doc = r.json()
-            for k in ("license", "license_data", "wv_license", "result"):
-                if k in doc and isinstance(doc[k], str):
-                    return base64.b64decode(doc[k])
-        except (json.JSONDecodeError, ValueError):
-            pass
     return r.content
 
 
-def fetch_keys_for_pssh(cdm: Cdm, sess: requests.Session, cfg: Config, asset_id: str, pssh_bytes: bytes) -> list[tuple[str, str]]:
+def fetch_keys_for_pssh(
+    cdm: Cdm,
+    sess: "_UpstreamSession",
+    cfg: Config,
+    *,
+    auth_token: str,
+    referer: str,
+    pssh_bytes: bytes,
+) -> list[tuple[str, str]]:
     """Run one license exchange for one PSSH.  Returns [(kid_hex,
     key_hex), ...] of CONTENT keys."""
     sid = cdm.open()
@@ -352,7 +413,9 @@ def fetch_keys_for_pssh(cdm: Cdm, sess: requests.Session, cfg: Config, asset_id:
                 cdm.set_service_certificate(sid, cert)
         pssh_obj = PSSH(pssh_bytes)
         challenge = cdm.get_license_challenge(sid, pssh_obj)
-        license_bytes = request_license(sess, cfg, asset_id, challenge)
+        license_bytes = request_license(
+            sess, cfg, auth_token=auth_token, challenge=challenge, referer=referer
+        )
         cdm.parse_license(sid, license_bytes)
         out: list[tuple[str, str]] = []
         for k in cdm.get_keys(sid):
@@ -381,33 +444,53 @@ def bulk_fetch_for_course(cfg: Config, course_url: str) -> int:
     keys = load_keyfile(cfg.keys_file)
     initial_count = len(keys)
     new_count = 0
+    drm_seen = 0
+    nondrm_seen = 0
 
     for item in iter_curriculum(sess, portal, course_id):
         asset = item.get("asset") or {}
         asset_id = str(asset.get("id") or "")
-        if not asset_id:
+        lecture_id = str(item.get("id") or "")
+        if not asset_id or not lecture_id:
             continue
         if asset.get("asset_type") != "Video":
             continue
-        # Encrypted lectures expose media_sources (DASH); plain video
-        # lectures expose stream_urls.  Skip the plain ones.
-        if not asset.get("media_sources"):
-            logger.debug(f"asset {asset_id} not DRM-protected -- skipping")
+        # The curriculum endpoint caches its media_license_token JWTs
+        # for several minutes, so they're usually expired by the time
+        # we POST.  Re-fetch via the per-lecture detail endpoint
+        # which mints a fresh JWT per call (same code path Udemy's
+        # web player uses on play).
+        if not asset.get("media_license_token"):
+            nondrm_seen += 1
             continue
-        mpd_url = extract_dash_mpd_url(asset)
+        fresh = fetch_fresh_lecture_asset(sess, course_id, lecture_id)
+        auth_token = (fresh or {}).get("media_license_token") if fresh else None
+        if not auth_token:
+            logger.warning(f"asset {asset_id}: could not fetch fresh JWT")
+            continue
+        drm_seen += 1
+        # Prefer the fresh asset's media_sources (mpd URL may also be
+        # signed/short-lived).
+        active_asset = fresh or asset
+        mpd_url = extract_dash_mpd_url(active_asset)
         if not mpd_url:
-            logger.warning(f"asset {asset_id}: no DASH manifest in media_sources")
+            logger.warning(f"asset {asset_id}: DRM but no DASH manifest in media_sources")
             continue
-        try:
-            pssh = fetch_mpd_pssh(sess, mpd_url)
-        except requests.RequestException as e:
-            logger.warning(f"asset {asset_id}: MPD fetch failed: {e}")
-            continue
+        pssh = fetch_mpd_pssh(sess, mpd_url)
         if not pssh:
             logger.warning(f"asset {asset_id}: no Widevine PSSH in MPD")
             continue
+        referer = (
+            f"https://www.udemy.com/course/{slug_or_id if not slug_or_id.isdigit() else course_id}"
+            f"/learn/lecture/{lecture_id}"
+        )
         try:
-            pairs = fetch_keys_for_pssh(cdm, sess, cfg, asset_id, pssh)
+            pairs = fetch_keys_for_pssh(
+                cdm, sess, cfg,
+                auth_token=auth_token,
+                referer=referer,
+                pssh_bytes=pssh,
+            )
         except Exception as e:
             logger.error(f"asset {asset_id}: license exchange failed: {e}")
             continue
@@ -415,47 +498,45 @@ def bulk_fetch_for_course(cfg: Config, course_url: str) -> int:
             if kid not in keys:
                 keys[kid] = key
                 new_count += 1
-                logger.info(f"+ key for asset {asset_id}: KID={kid}")
+                logger.info(f"+ key for asset {asset_id} (lecture {lecture_id}): KID={kid}")
         save_keyfile(cfg.keys_file, keys)
         time.sleep(cfg.request_delay_sec)
 
     logger.info(
-        f"bulk fetch done: {new_count} new keys, {len(keys)} total in keyfile "
-        f"(was {initial_count})"
+        f"bulk fetch done: DRM_lectures={drm_seen} non_DRM={nondrm_seen} "
+        f"new_keys={new_count} total_keys={len(keys)} (was {initial_count})"
     )
     return new_count
 
 
 def scan_out_dir(cfg: Config) -> int:
-    """Walk cfg.out_root for *.drm.mp4 / *.encrypted.mp4 files whose KID
-    isn't in keyfile.json yet, and fill the gaps.
-
-    This mode skips the curriculum API entirely -- useful when keys are
-    needed for an already-downloaded course that wasn't completed."""
+    """Walk cfg.out_root for already-downloaded encrypted MP4s, surface
+    any KIDs missing from keyfile.json.  Cannot fetch keys without the
+    course URL -- this is a diagnostic helper."""
     if not cfg.out_root.exists():
         logger.error(f"out_root does not exist: {cfg.out_root}")
         return 0
-    sess = _udemy_session(cfg.bearer)
-    cdm = load_cdm(cfg.wvd_path)
     keys = load_keyfile(cfg.keys_file)
-    new_count = 0
     encrypted_glob = list(cfg.out_root.rglob("*.encrypted.mp4")) + list(cfg.out_root.rglob("*.drm.mp4"))
     logger.info(f"scanning {len(encrypted_glob)} encrypted files under {cfg.out_root}")
+    missing = 0
     for mp4 in encrypted_glob:
         try:
             kid = extract_kid(str(mp4))
         except Exception as e:
             logger.warning(f"{mp4}: extract_kid failed: {e}")
             continue
-        if not kid or kid in keys:
+        if not kid:
             continue
+        if kid not in keys:
+            missing += 1
+            logger.warning(f"MISSING key for KID={kid} ({mp4.name})")
+    if missing:
         logger.warning(
-            f"{mp4} has KID={kid} but the file-only path can't re-fetch a "
-            "license without the asset_id + license URL.  Use --bulk for "
-            "courses you can identify by URL."
+            f"{missing} files have unknown KIDs.  Re-run --bulk for the "
+            "course they came from to populate keyfile.json."
         )
-    save_keyfile(cfg.keys_file, keys)
-    return new_count
+    return 0
 
 
 def watch_loop(cfg: Config, args: argparse.Namespace) -> None:
