@@ -11,11 +11,20 @@ This fork extends [Puyodead1/udemy-downloader](https://github.com/Puyodead1/udem
    and populates `keyfile.json` for you.  Upstream expects you to do
    this manually; the sidecar lets `udl-rip <course-url>` be a single
    end-to-end command.
-3. **PowerShell helpers** (`udl-*`) that auto-load in PS5 + PS7 per
+3. **PowerShell helpers** (`udl-*`, 13 aliases) that auto-load in PS5 + PS7 per
    [`Repos/POWERSHELL-HELPERS.md`](../POWERSHELL-HELPERS.md).
+4. A **sequential batch driver** (`udl-rip-batch`) that walks many courses
+   one after another, skipping ones already on disk.
 
 Upstream README is at [`README.md`](README.md); it covers the original
 CLI surface.  This file documents the bundle-specific bits.
+
+> **Deep dives** (start here for cold-pickup):
+> - [`docs/WORKFLOW.md`](docs/WORKFLOW.md) — the master narrative: file
+>   locations, two-phase pipeline, every helper's purpose, common pitfalls
+> - [`docs/DRM.md`](docs/DRM.md) — Widevine reverse-engineering history,
+>   license URL anatomy, the JWT freshness gotcha
+> - [`docs/BATCH.md`](docs/BATCH.md) — multi-course rip recipe
 
 ---
 

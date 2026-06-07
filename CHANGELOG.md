@@ -8,6 +8,44 @@ Upstream changes (merged in from `upstream/master`) are NOT mirrored
 here -- see `git log upstream/master..HEAD` for the local diff.
 
 
+## 2026-06-07 -- Docs + batch helper
+
+Long-form documentation + a sequential multi-course rip driver, after
+the first DRM pilot (`beginners-guide-to-technical-analysis`, 50
+lectures / 7.7 GB) landed cleanly end to end.
+
+### NEW
+
+- `docs/WORKFLOW.md` (NEW): the master narrative.  File locations
+  (CDM, bearer, cookies, keyfile, output), two-phase pipeline diagram,
+  the full `udl-*` command map with "when to reach for which", common
+  pitfalls with symptom → diagnosis → fix.
+  *Why:* future sessions need to pick up the project cold without
+  re-reading chat history.
+- `docs/DRM.md` (NEW): Udemy-specific Widevine deep-dive.  Pinned
+  license endpoint anatomy
+  (`https://www.udemy.com/media-license-server/validate-auth-token?drm_type=widevine&auth_token=<JWT>`),
+  the per-asset JWT structure, why curl_cffi + chrome120 is required,
+  the three Stage-F false starts (CF 403, "Token expired", EBUSY).
+  Mirrors `nsfw-rippers/hornyadventures-ripper-py/docs/DRM.md` shape.
+- `docs/BATCH.md` (NEW): `udl-rip-batch` usage + the 11-course batch
+  audit trail.  Disk-cap discipline rules of thumb.
+- `Invoke-UdlRipBatch` + `udl-rip-batch` alias in
+  `scripts/UdemyDownloader.ps1`: sequential multi-course rip.  Skips
+  courses whose output dir already has at least one `.mp4`.  Supports
+  inline URLs, `-File <path>`, and `-DryRun` (DRM probe only).
+  Brings helper count to 13.
+
+### UPDATED
+
+- `BUNDLE.md`: added a "Deep dives" callout pointing at the new
+  `docs/` files.  Bumped helper count to 13.
+- `Repos\POWERSHELL-HELPERS.md`: added `udl-rip-batch` to the `udl-*`
+  inventory.
+- `Repos\WIDEVINE-DECRYPT-PLAYBOOK.md`: appended Udemy as the second
+  fully-worked DRM example under "Cross-references".
+
+
 ## 2026-06-02 -- Initial bundle ship
 
 Forked `Puyodead1/udemy-downloader` to `cc3735/udemy-downloader` and

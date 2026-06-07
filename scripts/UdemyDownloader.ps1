@@ -321,6 +321,142 @@ function Invoke-UdlRipBg {
 }
 
 
+function Invoke-UdlRipBatch {
+    <#
+    .SYNOPSIS
+        Rip many courses sequentially.  Skips courses whose output dir
+        already contains at least one .mp4 (idempotent re-runs).
+
+    .DESCRIPTION
+        Walks a list of Udemy course URLs and calls udl-rip on each in
+        sequence.  Pass URLs as positional args OR -File <path> to read
+        from a text file (one URL per line; # for comments).
+
+        Use -DryRun to probe DRM status of every URL without ripping.
+
+    .EXAMPLE
+        udl-rip-batch 'https://www.udemy.com/course/foo/' 'https://www.udemy.com/course/bar/'
+
+    .EXAMPLE
+        udl-rip-batch -File C:\path\to\urls.txt
+
+    .EXAMPLE
+        udl-rip-batch -DryRun 'https://www.udemy.com/course/foo/' 'https://www.udemy.com/course/bar/'
+    #>
+    param(
+        [Parameter(ValueFromRemainingArguments = $true, Position = 0)]
+        [string[]]$Urls,
+
+        [string]$File,
+        [switch]$DryRun,
+        [int]$ConcurrentDownloads = 1,
+        [string]$OutRoot = $script:UdlOutDefault
+    )
+
+    # Load URL list
+    if ($File) {
+        if (-not (Test-Path $File)) {
+            Write-Error "URL file not found: $File"
+            return
+        }
+        $Urls = @()
+        foreach ($line in Get-Content $File) {
+            $line = $line.Trim()
+            if (-not $line -or $line.StartsWith('#')) { continue }
+            $Urls += $line
+        }
+    }
+
+    if (-not $Urls -or $Urls.Count -eq 0) {
+        Write-Error "No URLs provided.  Pass URLs as args or -File <path>."
+        return
+    }
+
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+    Write-Host "udl-rip-batch  -  $($Urls.Count) URL(s)" -ForegroundColor Cyan
+    Write-Host "Sequential.  Skips already-downloaded courses." -ForegroundColor Cyan
+    if ($DryRun) { Write-Host "DRY RUN: DRM probe only, no rip." -ForegroundColor Yellow }
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+
+    $stats = @{ ripped = 0; skipped = 0; failed = 0; total_seconds = 0 }
+
+    for ($i = 0; $i -lt $Urls.Count; $i++) {
+        $url = $Urls[$i]
+        # Slug = the segment between /course/ and the next / or ?
+        $slug = $null
+        if ($url -match '/course/([^/?]+)') { $slug = $matches[1] }
+        if (-not $slug) {
+            Write-Warning "[$($i+1)/$($Urls.Count)] Could not parse slug from: $url"
+            $stats.failed++
+            continue
+        }
+
+        Write-Host ""
+        Write-Host ("-" * 70) -ForegroundColor DarkGray
+        Write-Host "[$($i+1)/$($Urls.Count)] $slug" -ForegroundColor Cyan
+        Write-Host ("-" * 70) -ForegroundColor DarkGray
+
+        if ($DryRun) {
+            Invoke-UdlCheckDrm $url
+            continue
+        }
+
+        # Skip if already downloaded
+        $existing = Join-Path $OutRoot $slug
+        if (Test-Path $existing) {
+            $count = @(Get-ChildItem $existing -Recurse -Filter '*.mp4' -ErrorAction SilentlyContinue).Count
+            if ($count -gt 0) {
+                Write-Host "  SKIP: $count .mp4 already present in $existing" -ForegroundColor Yellow
+                $stats.skipped++
+                continue
+            }
+        }
+
+        $t0 = Get-Date
+        try {
+            Invoke-UdlRip -CourseUrl $url -ConcurrentDownloads $ConcurrentDownloads
+            if ($LASTEXITCODE -eq 0) {
+                $stats.ripped++
+            } else {
+                Write-Warning "  udl-rip exited $LASTEXITCODE for $slug"
+                $stats.failed++
+            }
+        } catch {
+            Write-Warning "  udl-rip threw: $_"
+            $stats.failed++
+        }
+        $stats.total_seconds += ((Get-Date) - $t0).TotalSeconds
+
+        # Post-rip snapshot for this course
+        if (Test-Path $existing) {
+            $newCount = @(Get-ChildItem $existing -Recurse -Filter '*.mp4' -ErrorAction SilentlyContinue).Count
+            $bytes = (Get-ChildItem $existing -Recurse -Filter '*.mp4' -ErrorAction SilentlyContinue |
+                      Measure-Object Length -Sum).Sum
+            $gb = [math]::Round($bytes / 1GB, 2)
+            Write-Host ("  → {0,5} files, {1,7} GB  in {2:N1} min" -f `
+                $newCount, $gb, (((Get-Date) - $t0).TotalMinutes)) -ForegroundColor Green
+        }
+    }
+
+    Write-Host ""
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+    if ($DryRun) {
+        Write-Host "DRY RUN complete." -ForegroundColor Cyan
+    } else {
+        $mins = [math]::Round($stats.total_seconds / 60, 1)
+        Write-Host ("Batch complete: {0} ripped, {1} skipped, {2} failed.  Total: {3} min." -f `
+            $stats.ripped, $stats.skipped, $stats.failed, $mins) -ForegroundColor Cyan
+        if (Test-Path $OutRoot) {
+            $allVids = @(Get-ChildItem $OutRoot -Recurse -Filter '*.mp4' -ErrorAction SilentlyContinue)
+            $allGB = [math]::Round(($allVids | Measure-Object Length -Sum).Sum / 1GB, 2)
+            Write-Host ("Library total: {0} mp4 files, {1} GB across {2}" -f `
+                $allVids.Count, $allGB, $OutRoot) -ForegroundColor Cyan
+        }
+    }
+    Write-Host ("=" * 70) -ForegroundColor Cyan
+}
+
+
 function Invoke-UdlWatch {
     <#
     .SYNOPSIS
@@ -372,4 +508,5 @@ Set-Alias -Name udl-check-drm         -Value Invoke-UdlCheckDrm         -Scope G
 Set-Alias -Name udl-keys              -Value Invoke-UdlKeys             -Scope Global -Force
 Set-Alias -Name udl-rip               -Value Invoke-UdlRip              -Scope Global -Force
 Set-Alias -Name udl-rip-bg            -Value Invoke-UdlRipBg            -Scope Global -Force
+Set-Alias -Name udl-rip-batch         -Value Invoke-UdlRipBatch         -Scope Global -Force
 Set-Alias -Name udl-watch             -Value Invoke-UdlWatch            -Scope Global -Force
