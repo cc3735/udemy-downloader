@@ -132,3 +132,7 @@ temp/
 *.exe
 # Docker Compose output volume
 output/
+
+# Bundle-specific (cc3735 fork)
+config/
+saved/

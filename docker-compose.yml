@@ -1,12 +1,40 @@
+# udemy-downloader (cc3735 fork) — bundle compose.
+#
+# Diverges from upstream so we can:
+#   - Mount the user's existing Widevine L3 CDM at /cdm/widevine.wvd
+#     (SAME .wvd that nsfw-rippers/hornyadventures-ripper-py mounts; both
+#     bind it read-only so there's no contention).
+#   - Make keyfile.json :rw so scripts/get_udemy_keys.py can populate it.
+#   - Land output at J:\V\2026\udemy\ to match the family convention.
+#   - Drop the `command:` override — invocations come via
+#     `docker compose run --rm udemy-downloader python ...` from the
+#     udl-* PowerShell helpers in scripts/UdemyDownloader.ps1.
+#
+# Override paths via env (set in shell or in config/.env):
+#   UDL_WVD_PATH_HOST  -> host path to the .wvd file (default: HA's path)
+#   UDL_OUT_HOST       -> host path for course outputs (default: J:/V/2026/udemy)
+#   UDEMY_BEARER       -> Udemy access token (Bearer)
+
 services:
   udemy-downloader:
     container_name: udemy-downloader
     build:
       context: .
       dockerfile: Dockerfile
+    image: udemy-downloader:latest
     volumes:
-      - ./output:/app/out_dir:rw
-      - ./keyfile.json:/app/keyfile.json:ro
+      # CDM — bind-mount the existing HA .wvd read-only.
+      - ${UDL_WVD_PATH_HOST:-C:/Users/023du/Google/sdk_gphone64_x86_64/28926/1971036799/google_sdk_gphone64_x86_64_17.0.0_e12384ad_28926_l3.wvd}:/cdm/widevine.wvd:ro
+      # Per-bundle config (Bearer token file, .env, optional cookies).
+      - ./config:/app/config:rw
+      # Key cache must be writable so the sidecar can append new KID:KEY pairs.
+      - ./keyfile.json:/app/keyfile.json:rw
+      # Output: courses land under J:\V\2026\udemy\<course>\... by default.
+      - ${UDL_OUT_HOST:-J:/V/2026/udemy}:/app/out_dir:rw
+    environment:
+      - UDL_WVD_PATH=/cdm/widevine.wvd
+      - UDL_KEYS_FILE=/app/keyfile.json
+      - UDL_OUT_ROOT=/app/out_dir
+      - UDEMY_BEARER=${UDEMY_BEARER:-}
     env_file:
-      - .env
-    command: python main.py -c $COURSE_URL
+      - ./config/.env
