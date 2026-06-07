@@ -267,13 +267,17 @@ function Invoke-UdlRip {
     }
 
     Write-Host "`n[udl-rip] Phase 2/2: download + decrypt course" -ForegroundColor Cyan
-    $mainArgs = @('-c', $CourseUrl, '-cd', $ConcurrentDownloads.ToString())
-    if ($Quality)          { $mainArgs += @('-q', $Quality) }
-    if ($SkipHls)          { $mainArgs += '--skip-hls' }
-    if ($IdAsCourseName)   { $mainArgs += '--id-as-course-name' }
-    if ($ChapterFilter)    { $mainArgs += @('--chapter-filter', $ChapterFilter) }
-    if ($DownloadCaptions) { $mainArgs += '--download-captions' }
-    docker compose -f $script:UdlCompose run --rm udemy-downloader python main.py @mainArgs
+    # Build the main.py args string -- main.py needs -b explicitly; it
+    # doesn't fall back to /app/config/bearer.txt on its own, so we
+    # source it inline.
+    $mainArgsStr = "-c `"$CourseUrl`" -cd $ConcurrentDownloads"
+    if ($Quality)          { $mainArgsStr += " -q `"$Quality`"" }
+    if ($SkipHls)          { $mainArgsStr += " --skip-hls" }
+    if ($IdAsCourseName)   { $mainArgsStr += " --id-as-course-name" }
+    if ($ChapterFilter)    { $mainArgsStr += " --chapter-filter `"$ChapterFilter`"" }
+    if ($DownloadCaptions) { $mainArgsStr += " --download-captions" }
+    docker compose -f $script:UdlCompose run --rm udemy-downloader sh -c `
+        "BEARER=`${UDEMY_BEARER:-`$(cat /app/config/bearer.txt 2>/dev/null)} && python main.py $mainArgsStr -b `"`$BEARER`""
 }
 
 
@@ -296,16 +300,18 @@ function Invoke-UdlRipBg {
         [switch]$IdAsCourseName
     )
     # Compose into one shell command so both phases run inside the same
-    # detached container (no orphaned key-fetch step).
+    # detached container (no orphaned key-fetch step).  main.py needs
+    # -b explicitly; source bearer from /app/config/bearer.txt if the
+    # env var is empty.
     $mainArgs = "-c `"$CourseUrl`" -cd $ConcurrentDownloads"
-    if ($Quality)        { $mainArgs += " -q $Quality" }
+    if ($Quality)        { $mainArgs += " -q `"$Quality`"" }
     if ($SkipHls)        { $mainArgs += " --skip-hls" }
     if ($IdAsCourseName) { $mainArgs += " --id-as-course-name" }
 
     $name = "udl-rip-bg-" + (Get-Date -Format 'yyyyMMdd-HHmmss')
     Write-Host "[udl-rip-bg] starting detached: $name" -ForegroundColor Cyan
     docker compose -f $script:UdlCompose run -d --name $name --rm udemy-downloader `
-        sh -c "python scripts/get_udemy_keys.py --course-url '$CourseUrl' --bulk && python main.py $mainArgs"
+        sh -c "BEARER=`${UDEMY_BEARER:-`$(cat /app/config/bearer.txt 2>/dev/null)} && python scripts/get_udemy_keys.py --course-url '$CourseUrl' --bulk && python main.py $mainArgs -b `"`$BEARER`""
     if ($LASTEXITCODE -eq 0) {
         Write-Host "  Container: $name"
         Write-Host "  Follow progress: udl-watch    (live file count)"
