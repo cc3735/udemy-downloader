@@ -1034,6 +1034,26 @@ class Udemy:
         #     course_id = self._extract_subscription_course_info(url)
         #     course = self._extract_course_info_json(url, course_id)
 
+        # cc3735-fork patch (2026-06-08):
+        # Some courses the user has access to are NOT in the subscribed
+        # list (e.g. one-off purchases outside the subscription model).
+        # Fall back to the direct course-detail endpoint, which works as
+        # long as the user has any access at all.
+        if not course:
+            try:
+                direct = self.session._get(
+                    f"https://{portal_name}.udemy.com/api-2.0/courses/{course_name}/"
+                    "?fields[course]=id,title,published_title,url"
+                ).json()
+                if direct and direct.get("id"):
+                    logger.info(
+                        f"Course '{course_name}' not in subscribed-courses list; "
+                        f"resolved via direct course-detail endpoint (id={direct['id']})."
+                    )
+                    course = direct
+            except Exception as _e:
+                pass
+
         if course:
             return course.get("id"), course
         if not course:

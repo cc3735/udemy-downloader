@@ -31,6 +31,11 @@ services:
       - ./keyfile.json:/app/keyfile.json:rw
       # Hot-reload sidecar + utility scripts without rebuilding the image.
       - ./scripts:/app/scripts:ro
+      # Hot-reload upstream Python modules too, so local patches to
+      # main.py / utils.py / constants.py don't require a rebuild.
+      - ./main.py:/app/main.py:ro
+      - ./utils.py:/app/utils.py:ro
+      - ./constants.py:/app/constants.py:ro
       # Output: courses land under J:\Knowledge\udemy\<course>\... by default.
       - ${UDL_OUT_HOST:-J:/Knowledge/udemy}:/app/out_dir:rw
     environment:
