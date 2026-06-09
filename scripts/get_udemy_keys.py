@@ -257,14 +257,34 @@ def resolve_course_id(sess: "_UpstreamSession", portal: str, slug_or_id: str) ->
 
 def iter_curriculum(sess: "_UpstreamSession", portal: str, course_id: str) -> Iterable[dict]:
     """Walks the paginated /subscriber-curriculum-items/ endpoint and
-    yields each `{_class: "lecture", asset: {...}}` entry."""
+    yields each `{_class: "lecture", asset: {...}}` entry.
+
+    Auto-retries on 5xx (HTTP 502/503/504 from Udemy's upstream gateway
+    are common; usually succeed within 1-2 retries with backoff)."""
     next_url = URLS.CURRICULUM_ITEMS.format(portal_name=portal, course_id=course_id)
     params: Optional[dict] = dict(CURRICULUM_ITEMS_PARAMS)
     while next_url:
-        r = sess._get(next_url, data=params if "?" not in next_url else None)
-        if r.status_code != 200:
+        # Up to 5 attempts: 0s, 8s, 16s, 32s, 64s of wait.
+        r = None
+        for attempt in range(5):
+            r = sess._get(next_url, data=params if "?" not in next_url else None)
+            if r.status_code == 200:
+                break
+            if r.status_code in (502, 503, 504):
+                if attempt < 4:
+                    wait = 2 ** (attempt + 3)  # 8, 16, 32, 64 seconds
+                    logger.warning(
+                        f"curriculum-items HTTP {r.status_code} (attempt "
+                        f"{attempt + 1}/5).  Retrying in {wait}s..."
+                    )
+                    time.sleep(wait)
+                    continue
+            # 4xx or non-retryable: break out of the retry loop
+            break
+        if not r or r.status_code != 200:
             raise RuntimeError(
-                f"curriculum-items HTTP {r.status_code}: {r.text[:200]!r}"
+                f"curriculum-items HTTP {r.status_code if r else 'no-response'}: "
+                f"{(r.text[:200] if r else '<no-response>')!r}"
             )
         data = r.json()
         for item in data.get("results", []):
