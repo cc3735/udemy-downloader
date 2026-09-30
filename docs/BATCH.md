@@ -71,9 +71,44 @@ udl-rip-batch -ConcurrentDownloads 2 -File urls.txt
 ```
 
 ### Skip already-downloaded courses
-Idempotent by design.  If `J:\Knowledge\udemy\<slug>\` exists and contains
+Idempotent by design.  If `M:\Knowledge\udemy\<slug>\` exists and contains
 at least one `.mp4`, the batch logs `SKIP (already ripped): <slug>` and
 moves on.  Re-running the same batch is safe.
+
+---
+
+## Safety checks
+
+Two guards exist because of a failure that went unnoticed for a month in
+Aug-Sep 2026: the output drive filled to zero bytes mid-batch, and while the
+*downloads* kept succeeding, the ffmpeg mux step could no longer write its
+output.  Courses were reported as `ripped`, but 855 lectures across 12
+courses were left as `<id>.encrypted.mp4` + `<id>.encrypted.m4a` -- video and
+audio downloaded, never combined, no playable file.  Nothing checked.
+
+### Free-space pre-flight
+Before anything downloads, the batch checks free space on the drive holding
+`-OutRoot` and aborts if it is below `-MinFreeGB` (default 20):
+
+```powershell
+udl-rip-batch -File urls.txt -MinFreeGB 50   # raise the floor
+udl-rip-batch -File urls.txt -MinFreeGB 0    # disable the check
+```
+
+### Post-rip mux verification
+After each course, the batch counts leftover `*.encrypted.mp4` files.  Any
+non-zero count means the mux failed for those lectures, and the batch says so
+per course and again in the closing summary.
+
+These files are **repairable without re-downloading** -- both encrypted tracks
+are intact on disk and the keys are already in `keyfile.json`.  The repair is
+`mp4decrypt` on each track followed by a stream-copy mux; note that
+`ffmpeg -decryption_key` alone will not open these audio tracks.
+
+> A duration check is *not* sufficient to detect this.  An encrypted,
+> video-only `.mp4` still reports a valid duration and an h264 stream to
+> `ffprobe` -- it simply has no audio.  Verify that an audio stream exists,
+> or check for the `.encrypted.mp4` filename pattern.
 
 ---
 

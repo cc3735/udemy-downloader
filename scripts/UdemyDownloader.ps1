@@ -10,7 +10,7 @@
 
 $script:UdlRepoPath = Split-Path $PSScriptRoot -Parent
 $script:UdlCompose  = Join-Path $script:UdlRepoPath 'docker-compose.yml'
-$script:UdlOutDefault = 'J:\Knowledge\udemy'
+$script:UdlOutDefault = 'M:\Knowledge\udemy'
 
 # ---------------------------------------------------------------------
 # Lifecycle
@@ -236,7 +236,7 @@ function Invoke-UdlRip {
     .SYNOPSIS
         Single-command end-to-end: bulk-fetch every Widevine key for the
         course via the CDM, then run upstream main.py to download +
-        decrypt every lecture.  Output lands under J:\Knowledge\udemy.
+        decrypt every lecture.  Output lands under M:\Knowledge\udemy.
 
         Runs in the foreground so progress streams to the terminal --
         use `udl-rip-bg <url>` if you want to detach.
@@ -350,7 +350,8 @@ function Invoke-UdlRipBatch {
         [string]$File,
         [switch]$DryRun,
         [int]$ConcurrentDownloads = 1,
-        [string]$OutRoot = $script:UdlOutDefault
+        [string]$OutRoot = $script:UdlOutDefault,
+        [int]$MinFreeGB = 20
     )
 
     # Load URL list
@@ -378,7 +379,27 @@ function Invoke-UdlRipBatch {
     if ($DryRun) { Write-Host "DRY RUN: DRM probe only, no rip." -ForegroundColor Yellow }
     Write-Host ("=" * 70) -ForegroundColor Cyan
 
-    $stats = @{ ripped = 0; skipped = 0; failed = 0; total_seconds = 0 }
+    $stats = @{ ripped = 0; skipped = 0; failed = 0; unmuxed = 0; total_seconds = 0 }
+
+    # Free-space pre-flight.  A full output drive fails silently and
+    # catastrophically: the download succeeds, but ffmpeg cannot write the
+    # muxed result, leaving <id>.encrypted.mp4 + <id>.encrypted.m4a and no
+    # playable file.  The batch still reports the course as "ripped".  That
+    # is exactly how 855 lectures were left broken across 12 courses in
+    # Aug-Sep 2026 without anyone noticing for a month.
+    $qualifier = (Split-Path -Qualifier $OutRoot) -replace ':', ''
+    $drive = Get-PSDrive $qualifier -ErrorAction SilentlyContinue
+    if ($drive) {
+        $freeGB = [math]::Round($drive.Free / 1GB, 1)
+        if ($freeGB -lt $MinFreeGB) {
+            Write-Host ""
+            Write-Error ("Only {0} GB free on {1}: -- below the {2} GB minimum. " -f `
+                $freeGB, $qualifier, $MinFreeGB) 
+            Write-Host "Free space or pass -MinFreeGB to override.  Aborting before anything downloads." -ForegroundColor Yellow
+            return
+        }
+        Write-Host ("Output drive {0}: {1} GB free" -f $qualifier, $freeGB) -ForegroundColor DarkGray
+    }
 
     for ($i = 0; $i -lt $Urls.Count; $i++) {
         $url = $Urls[$i]
@@ -435,6 +456,20 @@ function Invoke-UdlRipBatch {
             $gb = [math]::Round($bytes / 1GB, 2)
             Write-Host ("  → {0,5} files, {1,7} GB  in {2:N1} min" -f `
                 $newCount, $gb, (((Get-Date) - $t0).TotalMinutes)) -ForegroundColor Green
+
+            # Verify the mux actually produced playable files.  A leftover
+            # <id>.encrypted.mp4 means the video and audio tracks downloaded
+            # but were never combined -- the file has no audio and is not
+            # usable, even though the rip "succeeded".
+            $unmuxed = @(Get-ChildItem $existing -Recurse -Filter '*.encrypted.mp4' `
+                          -ErrorAction SilentlyContinue).Count
+            if ($unmuxed -gt 0) {
+                $stats.unmuxed += $unmuxed
+                Write-Warning ("  VERIFY: {0} lecture(s) downloaded but never muxed " -f $unmuxed)
+                Write-Host   ("           (leftover *.encrypted.mp4 -- video only, no audio)." ) -ForegroundColor Yellow
+                Write-Host   ("           Usually a full output drive.  These are repairable: the") -ForegroundColor Yellow
+                Write-Host   ("           encrypted tracks and keyfile.json are both still on disk.") -ForegroundColor Yellow
+            }
         }
     }
 
@@ -446,6 +481,10 @@ function Invoke-UdlRipBatch {
         $mins = [math]::Round($stats.total_seconds / 60, 1)
         Write-Host ("Batch complete: {0} ripped, {1} skipped, {2} failed.  Total: {3} min." -f `
             $stats.ripped, $stats.skipped, $stats.failed, $mins) -ForegroundColor Cyan
+        if ($stats.unmuxed -gt 0) {
+            Write-Warning ("{0} lecture(s) across the batch are downloaded but unmuxed " -f $stats.unmuxed)
+            Write-Host    ("  (video-only *.encrypted.mp4).  Check free space, then re-run to repair.") -ForegroundColor Yellow
+        }
         if (Test-Path $OutRoot) {
             $allVids = @(Get-ChildItem $OutRoot -Recurse -Filter '*.mp4' -ErrorAction SilentlyContinue)
             $allGB = [math]::Round(($allVids | Measure-Object Length -Sum).Sum / 1GB, 2)

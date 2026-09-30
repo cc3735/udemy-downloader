@@ -5,14 +5,14 @@
 #     (SAME .wvd that nsfw-rippers/hornyadventures-ripper-py mounts; both
 #     bind it read-only so there's no contention).
 #   - Make keyfile.json :rw so scripts/get_udemy_keys.py can populate it.
-#   - Land output at J:\V\2026\udemy\ to match the family convention.
+#   - Land output at M:\Knowledge\udemy\ to match the family convention.
 #   - Drop the `command:` override — invocations come via
 #     `docker compose run --rm udemy-downloader python ...` from the
 #     udl-* PowerShell helpers in scripts/UdemyDownloader.ps1.
 #
 # Override paths via env (set in shell or in config/.env):
 #   UDL_WVD_PATH_HOST  -> host path to the .wvd file (default: HA's path)
-#   UDL_OUT_HOST       -> host path for course outputs (default: J:/V/2026/udemy)
+#   UDL_OUT_HOST       -> host path for course outputs (default: M:/Knowledge/udemy)
 #   UDEMY_BEARER       -> Udemy access token (Bearer)
 
 services:
@@ -36,8 +36,8 @@ services:
       - ./main.py:/app/main.py:ro
       - ./utils.py:/app/utils.py:ro
       - ./constants.py:/app/constants.py:ro
-      # Output: courses land under J:\Knowledge\udemy\<course>\... by default.
-      - ${UDL_OUT_HOST:-J:/Knowledge/udemy}:/app/out_dir:rw
+      # Output: courses land under M:\Knowledge\udemy\<course>\... by default.
+      - ${UDL_OUT_HOST:-M:/Knowledge/udemy}:/app/out_dir:rw
     environment:
       - UDL_WVD_PATH=/cdm/widevine.wvd
       - UDL_KEYS_FILE=/app/keyfile.json

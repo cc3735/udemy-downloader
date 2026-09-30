@@ -47,7 +47,7 @@ What that does, under the hood:
    downloads every lecture's video + audio tracks via aria2c + yt-dlp,
    then muxes them with ffmpeg's `-decryption_key` (KID:KEY now present
    in `keyfile.json`).  Final files land under
-   `J:\V\2026\udemy\<course-name>\<chapter>_<chapter-name>\<lecture>_<lecture-title>.mp4`.
+   `M:\Knowledge\udemy\<course-name>\<chapter>_<chapter-name>\<lecture>_<lecture-title>.mp4`.
 
 You provide a URL.  Everything else is automatic.
 
@@ -120,7 +120,7 @@ You can test without editing the source by passing
 ## Output layout
 
 ```
-J:\V\2026\udemy\
+M:\Knowledge\udemy\
   <course-name-or-id>\
     1_introduction\
       1_welcome.mp4

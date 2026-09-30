@@ -59,7 +59,7 @@ udl-rip <course-url>
         └─ mux_process(... audio_key, video_key)
               └─ ffmpeg -decryption_key <key> -decryption_kid <kid>
                     → muxed clean .mp4 at
-                       J:\Knowledge\udemy\<course>\<chapter>\<lecture>.mp4
+                       M:\Knowledge\udemy\<course>\<chapter>\<lecture>.mp4
 ```
 
 Two independent containers per course (Phase 1 then Phase 2), one
@@ -78,7 +78,7 @@ the curriculum but emits 0 keys).
 | Browser cookies | `config\cookies.txt` | `/app/config/cookies.txt` | Netscape format.  Source of truth when running `udl-bearer-from-cookies` |
 | Bundle env | `config\.env` | (compose-resolved) | Optional `UDEMY_BEARER=…` override; `UDL_OUT_HOST=…` to relocate output |
 | Key cache | `keyfile.json` | `/app/keyfile.json` (`:rw`) | `{kid_hex: key_hex}` JSON, accumulates across rips |
-| Output root | `J:\Knowledge\udemy\` | `/app/out_dir` (`:rw`) | Course tree lands here.  Override via `UDL_OUT_HOST` |
+| Output root | `M:\Knowledge\udemy\` | `/app/out_dir` (`:rw`) | Course tree lands here.  Override via `UDL_OUT_HOST` |
 | Helpers | `scripts\UdemyDownloader.ps1` | n/a | Auto-loaded via `.ps-autoload` marker in `scripts\` |
 | Compose | `docker-compose.yml` | n/a | The single place all mounts are declared |
 | Sidecar | `scripts\get_udemy_keys.py` | `/app/scripts/get_udemy_keys.py` (`:ro` bind-mounted) | Hot-reloaded — edit, re-run, no rebuild |
@@ -86,7 +86,7 @@ the curriculum but emits 0 keys).
 **Output layout**:
 
 ```
-J:\Knowledge\udemy\
+M:\Knowledge\udemy\
   <course-published-title>\
     01 - <chapter title>\
       001 <lecture title>.mp4
